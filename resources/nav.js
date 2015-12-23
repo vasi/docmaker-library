@@ -110,5 +110,17 @@ ht_archive +
       return false;
       });
     
-    
+   $(document).keydown(function (e) {
+   	 switch (e.which) {
+   	 	 case 37: // left
+				 setpage(myidx - 1);
+				 return false;
+				 break;
+			 case 39: // right
+				 setpage(myidx + 1);
+				 return false;
+				 break;
+     }
+		 return true;
+   }); 
     });
