@@ -1,0 +1,142 @@
+#!/usr/bin/env perl
+use strict;
+use warnings 'FATAL' => 'all';
+
+use File::Basename;
+use Data::Dumper;
+use HTML::Entities;
+use Cwd qw(getcwd realpath);
+
+our $FILEROOT = dirname(__FILE__);
+our $FULLROOT = realpath($FILEROOT);
+require 'modules/decode.subs';
+require 'modules/rfork.subs';
+require 'modules/image.subs';
+require 'modules/document.subs';
+require 'modules/page.subs';
+
+our ($FOLDER);
+
+sub standalonePictToImage {
+  my ($pict, $outpath) = @_;
+  return 0 unless defined($pict);
+  return 0 unless $outpath;
+  
+  my $tmpname = "$outpath.pict";
+  my $tmp_fh;
+  open($tmp_fh, '>', $tmpname) or die "Could not write to $tmpname: $!";
+  print $tmp_fh chr(0) x 512;
+  print $tmp_fh $pict;
+  close $tmp_fh;
+  
+  # PICT parsing can't be left to the professionals.
+  system(qq(convert pict:"$tmpname" "$outpath"));  
+  unlink $tmpname;
+}
+
+sub sanityCheck {
+  my ($info, %opts) = @_;
+
+  die "Input must be MacBinary, BinHex, or AppleSingle\n"
+    unless $info->{parsed};
+
+  my $type = $info->{'type'};
+  $type = 'APPL' unless defined $type;
+  my $creator = $info->{'creator'};
+  $type = 'Dk@P' unless defined $creator;
+  die "Type should be APPL/Dk\@P, input has $type/$creator\n"
+    unless $type eq 'APPL' && $creator eq 'Dk@P';
+
+  # unpack resource fork
+  my $rsrc = RForkToHash($info->{'resource_fork'});
+  die "Problem reading resource data\n" unless $rsrc;
+
+  die "Couldn't find DOCMaker pages\n"
+    unless exists $rsrc->{'TEXT'} && exists $rsrc->{'TEXT'}{'128'}
+    && exists $rsrc->{'styl'} && exists $rsrc->{'styl'}{'128'};
+
+  return $rsrc;
+}
+
+sub displayName {
+  my ($info, $filename) = @_;
+  $filename = basename($filename);
+
+  my $fname = $info->{filename};
+  unless (defined $fname) {
+    $fname = $filename;
+    $fname =~ s|^.*/||;
+    $fname =~ s/\.(bin|hqx|as|applesingle|macbin|macbinary)$//i;
+  }
+  $fname =~ s/[\s\r\n]+/ /;
+  $fname =~ s/^ //;
+  $fname =~ s/ $//;
+  $fname = 'Untitled' unless length $fname;
+
+  return $fname;
+}
+
+sub convert {
+  my (%opts) = @_;
+  my $info = ReadMacFile($opts{input});
+  my $rsrc = sanityCheck($info, %opts);
+
+  my $folder = $FOLDER = $opts{output};
+  mkdir $folder or die "Can't create output: $!\n" unless -d $folder;
+
+  # save icon - try custom, fall back to standard
+  my $iconpath = "$folder/icon.png";
+  IconToImage(
+    $rsrc->{'ICN#'}{'-16455'}{'data'},
+    $rsrc->{'icl8'}{'-16455'}{'data'}, $iconpath
+  ) or IconToImage(
+    $rsrc->{'ICN#'}{'128'}{'data'},
+    $rsrc->{'icl8'}{'128'}{'data'}, $iconpath
+  );
+
+  # picts
+  my $picthtml = '';
+  # save included images
+  if (exists $rsrc->{'PICT'}) {
+    for my $id (sort keys %{ $rsrc->{'PICT'} }) {
+      next unless $id > 2000;
+      standalonePictToImage($rsrc->{'PICT'}{$id}{'data'},
+        "$folder/pict$id.png");
+      $picthtml .= qq(<p>PICT $id: <img src="pict$id.png"></p>\n);
+    }
+  }
+
+  # generate CSS/JS
+  my $display_name = displayName($info, $opts{input});
+  open my $out_fh, '>', "$folder/page.css";
+  print $out_fh PageCSS($rsrc);
+  close $out_fh;
+  open $out_fh, '>', "$folder/page.js";
+  print $out_fh PageJS($rsrc, $display_name, $display_name);
+  close $out_fh;
+
+  # pages
+  my $ptitles = PageTitles($rsrc);
+  for my $i (1..scalar(@$ptitles)) {
+    my $page_html = GenPageStart($display_name . ': ' . $ptitles->[$i - 1], "page$i");
+    $page_html .= <<END;
+<div class="page_main page${i}_margins"><div class="page${i}_content">
+@{[ StyledPage($rsrc, $i) ]}
+</div></div>
+END
+    $page_html .= GenPageEnd();
+    open $out_fh, '>', "$folder/" . PageLink($i);
+    print $out_fh $page_html;
+    close $out_fh;
+  }
+}
+
+
+my ($in, $out) = @ARGV;
+eval {
+  convert(input => $in, output => $out);
+};
+if ($@) {
+  print STDERR $@;
+  exit 2;
+}
